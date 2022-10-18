@@ -1,0 +1,319 @@
+---
+title: "netNCP tutorial"
+output:
+  html_document:
+    df_print: paged
+editor_options: 
+  chunk_output_type: console
+---
+
+This is a tutorial for the netNCP approach, presenting the main concepts and calculation steps based on a fictional, simple case study. 
+
+```{r}
+library(data.table)
+library(knitr)
+library(ggplot2)
+library(cowplot)
+library(colorspace)
+set.seed(101)
+```
+# Presentation of the case study
+
+The fictional area is a large forest area, divided between 60% dense coniferous plantations and 40% unmanaged mixed forests. Half the forest is privately owned with restricted entrance (covering equally both forest types). Three stakeholder groups are considered: locals, landowners and foresters. 
+
+### NCP indicators and supply
+We focus on four main NCP: climate change mitigation (estimated from carbon sequestration rates in soil and trees), timber production (annual timber volume increment), aesthetic value (estimated from forest openness and tree diversity), and  health risks (frequency of falling branches and abundance of allergenic plants). 
+
+For the sake of this example, we assume that on average coniferous plantations provide higher timber production, but have low values for most aesthetic value indicators and similar sequestration rates than mixed forests.
+
+```{r}
+rep = c(6, 4)
+Supply_indicators = data.table(Forest_type = rep(c('Coniferous', 'Mixed'), times = rep),
+                                   Replicate = c(1:rep[1], 1:rep[2]),
+                               # C sequestration rates in soil, t.C/ha/yr
+                                    Climate_seq_soil = c(rnorm(rep[1], 0.3,0.1), rnorm(rep[2], 0.4, 0.1)), 
+                               # C sequestration rates in trees, t.C/ha/yr
+                                    Climate_seq_trees = c(rnorm(rep[1],9,1),   rnorm(rep[2],8, 1)),  
+                               # Timber volume increment, m3/ha/yr
+                                    Timber_prod = c(rnorm(rep[1],13,1), rnorm(rep[2],7,1)), 
+                                # % of open canopy
+                                    Aesthetic_open = c(rnorm(rep[1],20, 5), rnorm(rep[2],40, 5)), 
+                                # # of tree species present
+                                    Aesthetic_diversity = c(rnorm(rep[1],1, 0.5),  rnorm(rep[2],6, 0.5)), 
+                               # Risk of falling branches in a 1-10 scale
+                                    Health_risk_branch = c(rnorm(rep[1],1, 1), rnorm(rep[2],6, 1)), 
+                               # Number of allergenic plants per m2
+                                    Health_risk_allergy = c(rnorm(rep[1],5,0.2), rnorm(rep[2], 7, 0.2))) 
+
+kable(Supply_indicators[, lapply(.SD, mean), .SDcols = c('Climate_seq_soil', 'Climate_seq_trees', 'Timber_prod', 'Aesthetic_open', 'Aesthetic_diversity', 'Health_risk_branch','Health_risk_allergy'), by = Forest_type], caption = 'Average indicator values per forest type')
+```
+
+### NCP priorities and access
+
+All stakeholders groups were asked to distribute a maximum of 20 points to each NCP, representing their priority for the supply (or avoidance thereof) of the NCP. In practice, interviews should be conducted across multiple respondents; here only the average by group is shown. Landowners prioritise all beneficial and detrimental NCP equitably, and gave 5 points to each on average. Foresters mostly prioritise timber production (10 points) and gave 2 points to all other NCP. Locals prioritise mostly aesthetics (8 points), health risks (5 points) and to a lower extent carbon sequestration (4 points). 
+ 
+Landowners and foresters have access to the whole forest, so their access filter (proportion of the NCP supply that is accessible) is equal to 1 for all NCP. On the contrary, locals only have physical access to the public part of the forest. This does not affect their benefits and detriments from carbon sequestration or health risks which (we assume) does not require physical access, but this hinders their realised supply of aesthetic value and timber production to half the forest (access filter = 0.5).
+
+```{r,  echo=FALSE}
+Priority_points = data.table(NCP = c('Climate', 'Timber', 'Aesthetic', 'Health_risk'),
+                                    Landowners = c(5, 5, 5, 5),
+                                    Foresters =  c(2, 10, 2, 2), 
+                                    Locals =     c(4, 0, 8, 5))
+Access = data.table(NCP = c('Climate', 'Timber', 'Aesthetic', 'Health_risk'),
+                                    Landowners = c(1, 1, 1, 1),
+                                    Foresters =  c(1, 1, 1, 1), 
+                                    Locals =     c(1, 0.5, 0.5, 1))
+
+kable(Priority_points, caption = 'Priority points per stakeholder group')
+
+kable(Access, caption = 'Access filter per stakeholder group')
+```
+
+### Supply-benefit/detriment relationships
+
+Ideally, supply-benefit relationships should be deducted from quantitative or semi-quantitative surveys and adapted to individual stakeholder groups. Here we provide a function to create examples of SB relationships for standard shapes. If you use your own supply-benefit/detriments relationships, make sure the resulting benefits/detriments are scaled between 0 (no benefit/detriment) and 1 (maximum benefit) or -1 (maximum detriment).
+
+```{r}
+# This function takes as input the observed supply, the name of the single NCP, the expected shape of the SB relationship, the theoretical minimum and maximum supply of the single NCP, and if needed the threshold
+SB_relationship = function(supply_obs, names = NA, shape, supply_min, supply_max, threshold = NA){
+  supply_was_na = FALSE
+          if (all(is.na(supply_obs))){ # If no supply is provided, a sequence is generated between the min and max supply
+            supply_obs = seq(supply_min, supply_max, length.out = 50)
+              supply_was_na = TRUE
+          }
+            if ( (min(supply_obs) < supply_min | max(supply_obs) > supply_max)) {
+              print("Warning: S should be in range (between min and max)")
+            }
+
+           if (!is.na(threshold)){
+             if (threshold <= supply_min | threshold >= supply_max ) {
+              print(
+                "Warning: the threshold should be higher than the minimum and lower than the maximum supply"
+              )}} 
+            if (shape == "linear_benefits") { # E.g. aesthetics follow a linear positive SB relationship
+              benefit_obs = (supply_obs - supply_min)/(supply_max - supply_min)
+            }
+            if (shape == "linear_detriments") { # E.g. health risks follow a linear negative SB relationship
+              benefit_obs = -(supply_obs - supply_min)/(supply_max - supply_min)
+            }
+            if (shape == "threshold_cubic_benefits") {# Production needs to reach a threshold before becoming profitable, then increasing return. Eg: timber production
+               benefit_obs = ifelse(supply_obs < threshold, 0, (supply_obs^3 - supply_min^3)/(supply_max^3 - supply_min^3))
+            }
+            if (shape == "detriments_threshold_benefits") {# E.g. carbon sequestration
+               benefit_obs = ifelse(supply_obs < threshold, (supply_obs - threshold) / (supply_max - threshold), (supply_obs - threshold)/(supply_max- threshold))
+            }
+             return(list(benefit_obs = benefit_obs))
+ }
+
+# This function applies SB relationship to a data table, taking as input the data table, NCP names as well as min, max and threshold values for each NCP
+apply_SB = function(DATA, ncp_names, supply_min, supply_max, shapes, thresholds = NA){
+ for (ncp in ncp_names){
+   DATA[NCP == ncp,   
+              Benefits := SB_relationship(supply_obs = NCP_supply_realised, supply_min = supply_min[ncp], supply_max = supply_max[ncp],
+                                          shape = shapes[ncp], threshold = thresholds[ncp])]
+ }
+  return(DATA)
+}
+
+# This function plot the SB relationships based on given supply values
+plot_SB = function(DATA, ncp_names, supply_min, supply_max, shapes, thresholds, breaks = 100){
+  # Create sequential data
+   SBdata = data.table(NCP = rep(ncp_names, each = breaks))
+   SBdata = SBdata[, NCP_supply_realised := seq(from = supply_min[NCP], to = supply_max[NCP], length.out = breaks), by = NCP]
+
+   apply_SB(SBdata, ncp_names, supply_min, supply_max, shapes, thresholds)
+   SBdata[Benefits >= 0, c('ribbon_max', 'ribbon_min') := list(Benefits, 0)]
+   SBdata[Benefits < 0,  c('ribbon_max', 'ribbon_min') := list(0, Benefits)]
+
+      SBplot = ggplot(SBdata, aes(x = NCP_supply_realised, y = Benefits, fill = Benefits>0, ymax = ribbon_max, ymin = ribbon_min)) + facet_wrap(~NCP, , scales = "free") +
+              geom_ribbon(alpha = 0.3) +
+        scale_fill_manual(values = c('#FDAE61', '#ABDDA4'), labels = c('Detriments', 'Benefits'), name = '')+
+              xlab('Supply') + ylab('Benefit') + theme_bw()
+      
+     # if supply data is provided, calculate corresponding benefits
+  if (!is.null(DATA) & !all(is.na(DATA$NCP_supply_realised))){
+  apply_SB(DATA, ncp_names, supply_min, supply_max, shapes, thresholds)
+  
+  SBplot = SBplot + 
+    geom_segment(data = DATA, aes(x = -Inf, xend = NCP_supply_realised, yend = Benefits, y = Benefits, color = Benefits),  inherit.aes = F) +
+    geom_segment(data = DATA, aes(x = NCP_supply_realised, xend = NCP_supply_realised, yend = Benefits, y = -Inf, color = Benefits), inherit.aes = F) +
+      scale_color_continuous_divergingx(palette = 'Spectral', mid = 0) #+ 
+#scale_color_gradient2(low = brewer.pal(8, "Spectral")[1], mid = brewer.pal(7, "Spectral")[4], high = brewer.pal(8, #"Spectral")[7], midpoint = 0) 
+  }
+ return(SBplot)
+}
+
+# This function scales values between 0 (min) and 1 (max)
+scale01 = function(x){
+  y = (x-min(x))/(max(x)-min(x))
+}
+          
+```
+
+
+# Calculation of netNCP
+
+### Step 1. NCP supply
+
+The first step is to convert the indicator values into (potential) supply estimates. The exact procedure depends on the NCP and indicators. Here, the climate change mitigation is measured as the sum of carbon sequestration rates in soils and trees; timber production as the volume increment (sole indicator); and aesthetic value and health risks as the average of their respective components, after scaling them between 0 and 1.
+
+
+```{r}
+Supply_NCP = Supply_indicators[, list(Forest_type = Forest_type,
+                                      Replicate = Replicate,
+                                      Climate = Climate_seq_soil + Climate_seq_trees,
+                                      Timber = Timber_prod,
+                                      Aesthetic = (scale01(Aesthetic_open) + scale01(Aesthetic_diversity))/2,
+                                      Health_risk = (scale01(Health_risk_branch) + scale01(Health_risk_allergy))/2
+                                        )]
+kable(Supply_NCP, caption = 'Supply of each NCP') 
+
+```
+
+Then, the potential NCP supply needs to be adjusted to what stakeholders can actually benefit from, i.e. the access filter; to obtain the realised supply. To do that more easily, we switch to a long table format.
+
+```{r}
+Supply_NCP_long = melt.data.table(Supply_NCP, id.vars = c('Forest_type', 'Replicate'), variable.name = 'NCP', value.name = 'NCP_supply_potential')
+Access_long = melt.data.table(Access, id.vars = 'NCP', variable.name = "Group", value.name = "Access")
+Supply_access = merge.data.table(Supply_NCP_long, Access_long, by = c('NCP'), all = T, allow.cartesian=TRUE)
+# The realised supply is the supply potential restricted to the proportion that is accessible
+Supply_access[, NCP_supply_realised := NCP_supply_potential*Access]
+```
+
+### Step 2 and 3. Supply-benefit relationship
+
+The realised supply scores can then be converted into benefits through the supply-benefit relationship. This need to be done independently for each service as the SB relationships might be different. Here the maximums and minimum supply levels are fixed beforehand (e.g. based on biophysical limits); but alternatively they can be set to the minimum or maximum within each variable. We obtain final benefits and detriment scores.
+
+
+```{r}
+#![](images/yourimagename.png)
+
+ncp_names = c('Climate','Timber', 'Aesthetic', 'Health_risk')
+supply_min = c(Climate = -5, Timber = 0, Aesthetic = 0, Health_risk = 0)
+supply_max = c(Climate = 15, Timber = 20, Aesthetic = 1, Health_risk = 10)
+shapes =     c(Climate = 'detriments_threshold_benefits', Timber = 'threshold_cubic_benefits', Aesthetic = 'linear_benefits', Health_risk = 'linear_detriments')
+thresholds = c(Climate = 0, Timber = 5, Aesthetic = NA, Health_risk = NA)
+
+apply_SB(Supply_access, ncp_names, supply_min, supply_max, shapes, thresholds)
+```
+
+We plot the overall SB relationships (colored ribbons: green is benefits, red is detriments); the lines indicate actual supply values and corresponding benefits/detriments scores
+```{r}
+plot_SB(Supply_access, ncp_names, supply_min, supply_max, shapes, thresholds)
+```
+
+### Step 4 and 5. Integration of stakeholder priority scores into weighted NCP scores
+
+We now add in the priorities of each stakeholder group. For this, we need to obtain relative priority scores (scaled between 0 and 1) by scaling the priority to the total number of points given by each group. 
+
+```{r}
+Priority_relative = Priority_points[, list(NCP = NCP,
+                                           Landowners = Landowners/(sum(Landowners)),
+                                           Foresters = Foresters/(sum(Foresters)),
+                                           Locals = Locals/(sum(Locals)))]
+
+Priority_relative
+```
+
+This is also converted to the long format to facilitate integration to the supply data
+
+```{r}
+Priority_long = melt.data.table(Priority_relative, id.vars = 'NCP', variable.name = "Group", value.name = "Priority")
+```
+
+Now we merge both datasets and calculate weighted benefit scores as benefits x priority
+```{r}
+Supply_access_priority = merge.data.table(Priority_long, Supply_access, by = c('NCP','Group' ))
+Supply_access_priority[, Weighted_scores := Benefits * Priority]
+
+```
+
+Finally we calculate average and variation of netNCP for each stakeholder group and forest type.
+
+```{r}
+netNCP_replicate = Supply_access_priority[, list(netNCP = sum(Weighted_scores)), by = c('Group', 'Forest_type', 'Replicate')]
+netNCP_overall = netNCP_replicate[, list(netNCP_mean = mean(netNCP),
+                                               netNCP_sd = sd(netNCP)), by = c('Group', 'Forest_type')]
+ggplot(netNCP_overall, aes(y = netNCP_mean, ymin = netNCP_mean-netNCP_sd, ymax = netNCP_mean+netNCP_sd, 
+                           fill = Forest_type, x = Group)) +
+  geom_col(position = position_dodge()) +
+  geom_errorbar(position = position_dodge()) +
+  xlab('Stakeholder group') + ylab('netNCP') + theme_bw()
+
+```
+
+
+## Identifying the limiting factors
+
+We can also identify the limiting point, i.e. which component of netNCP has the most effect on resulting netNCP. Here we look at 10% increase or decrease
+
+
+```{r}
+
+# This function summarises all steps presented above
+calculate_netNCP = function(Supply_NCP, Access, Priority_points, ncp_names, supply_min, supply_max, shapes, thresholds){
+  
+Supply_NCP_long = melt.data.table(Supply_NCP, id.vars = colnames(Supply_NCP)[!(colnames(Supply_NCP)%in%ncp_names) ], variable.name = 'NCP', value.name = 'NCP_supply_potential')
+Access_long = melt.data.table(Access, id.vars = 'NCP', variable.name = "Group", value.name = "Access")
+Supply_access = merge.data.table(Supply_NCP_long, Access_long, by = c('NCP'), all = T, allow.cartesian=TRUE)
+Supply_access[, NCP_supply_realised := NCP_supply_potential*Access]
+apply_SB(Supply_access, ncp_names, supply_min, supply_max, shapes, thresholds)
+
+Priority_relative = cbind(Priority_points$NCP, Priority_points[, lapply(.SD, function(x){x/sum(x)})
+                                                               ,.SDcols = colnames(Priority_points[,-'NCP'])])
+Supply_access_priority = merge.data.table(Priority_long, Supply_access, by = c('NCP','Group' ))
+Supply_access_priority[, Weighted_scores := Benefits * Priority]
+netNCP_replicate = Supply_access_priority[, list(netNCP = sum(Weighted_scores)), by = c('Group', 'Forest_type', 'Replicate')]
+netNCP_overall = netNCP_replicate[, list(netNCP_mean = mean(netNCP),
+                                               netNCP_sd = sd(netNCP)), by = c('Group', 'Forest_type')]
+return(netNCP_overall)
+}
+
+
+# We generate a set of different parameters (+/- 10% on access and supply of each NCP) and calculate the relative effect on netNCP
+
+sensitivity_results = data.table(calculate_netNCP(Supply_NCP, Access, Priority_points, ncp_names, supply_min, supply_max, shapes, thresholds))
+sensitivity_results[, c('Sensitivity_type', 'Sensitivity_detail', 'Change') := list('Baseline', 'Baseline', '0')]
+
+stakeholder_names = c('Landowners', 'Foresters', 'Locals')
+for (change in c(0.1, -0.1)){
+  # 1. Changes in supply
+for (ncp in ncp_names){
+  Supply_NCP_new = copy(Supply_NCP)
+  Supply_NCP_new[, (ncp) := lapply(.SD, function(x){x + x*change}), .SDcols = ncp]
+  sensitivity_results = rbind(sensitivity_results,
+                                         calculate_netNCP(Supply_NCP_new, Access, Priority_points, ncp_names, supply_min, supply_max, shapes, thresholds)[, c('Sensitivity_type', 'Sensitivity_detail', 'Change') := list('Change in supply', ncp, change)])
+}
+  
+ # 2. Changes in access
+for (stakeholder in stakeholder_names){
+  Access_new = copy(Access)
+  Access_new[, (stakeholder):= lapply(.SD, function(x){ x + x*change }), .SDcols = stakeholder] 
+  Access_new[(stakeholder) > 1, (stakeholder):= 1]#(access is limited between 0 and 1)
+  Access_new[(stakeholder) < 0, (stakeholder):= 0]#(access is limited between 0 and 1)
+
+  sensitivity_results = rbind(sensitivity_results,
+                              calculate_netNCP(Supply_NCP, Access_new, Priority_points, ncp_names, supply_min, supply_max, shapes, thresholds)[, c('Sensitivity_type', 'Sensitivity_detail', 'Change') := list('Change in access', stakeholder, change)])
+}
+  
+}
+
+
+```
+ Now we calculate the relative change compared to the baseline situation
+```{r}
+
+sensitivity_results[, sensitivity := paste(Sensitivity_type, Sensitivity_detail, Change, sep = '_')]
+#sensitivity_results_melt = melt.data.table(sensitivity_results, id.vars = c('Group', 'Forest_type'), value.var = #c('sensitivity','netNCP_mean'))
+sensitivity_results[, baseline_netNCP := netNCP_mean[Group == Group & Forest_type == Forest_type & Sensitivity_detail == "Baseline"], by = c('Group', 'Forest_type')]
+  
+sensitivity_results[, rel_change := (netNCP_mean-baseline_netNCP)/baseline_netNCP]
+
+
+ggplot(sensitivity_results[Change == 0.1], aes(rel_change,  x = Group, fill = Sensitivity_detail )) + geom_col(position = position_dodge()) + facet_wrap(~Sensitivity_type)
+
+
+```
+
+
+
