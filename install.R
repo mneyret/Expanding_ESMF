@@ -1,5 +1,5 @@
-install.packages('data.table')
-install.packages('knitr'')
 install.packages('ggplot2')
-install.packages('cowplot'')
+install.packages('cowplot')
+install.packages('data.table')
+install.packages('knitr')
 install.packages('colorspace')
